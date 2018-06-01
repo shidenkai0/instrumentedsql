@@ -46,6 +46,7 @@ type wrappedResult struct {
 type wrappedRows struct {
 	Logger
 	Tracer
+	span   Span
 	ctx    context.Context
 	parent driver.Rows
 }
@@ -224,7 +225,7 @@ func (c wrappedConn) Query(query string, args []driver.Value) (driver.Rows, erro
 			return nil, err
 		}
 
-		return wrappedRows{Tracer: c.Tracer, Logger: c.Logger, parent: rows}, nil
+		return &wrappedRows{Tracer: c.Tracer, Logger: c.Logger, parent: rows}, nil
 	}
 
 	return nil, driver.ErrSkip
@@ -247,7 +248,7 @@ func (c wrappedConn) QueryContext(ctx context.Context, query string, args []driv
 			return nil, err
 		}
 
-		return wrappedRows{Tracer: c.Tracer, Logger: c.Logger, ctx: ctx, parent: rows}, nil
+		return &wrappedRows{Tracer: c.Tracer, Logger: c.Logger, ctx: ctx, parent: rows}, nil
 	}
 
 	dargs, err := namedValueToValue(args)
@@ -339,7 +340,7 @@ func (s wrappedStmt) Query(args []driver.Value) (rows driver.Rows, err error) {
 		return nil, err
 	}
 
-	return wrappedRows{Tracer: s.Tracer, Logger: s.Logger, ctx: s.ctx, parent: rows}, nil
+	return &wrappedRows{Tracer: s.Tracer, Logger: s.Logger, ctx: s.ctx, parent: rows}, nil
 }
 
 func (s wrappedStmt) ExecContext(ctx context.Context, args []driver.NamedValue) (res driver.Result, err error) {
@@ -394,7 +395,7 @@ func (s wrappedStmt) QueryContext(ctx context.Context, args []driver.NamedValue)
 			return nil, err
 		}
 
-		return wrappedRows{Tracer: s.Tracer, Logger: s.Logger, ctx: ctx, parent: rows}, nil
+		return &wrappedRows{Tracer: s.Tracer, Logger: s.Logger, ctx: ctx, parent: rows}, nil
 	}
 
 	dargs, err := namedValueToValue(args)
@@ -435,23 +436,27 @@ func (r wrappedResult) RowsAffected() (num int64, err error) {
 	return r.parent.RowsAffected()
 }
 
-func (r wrappedRows) Columns() []string {
+func (r *wrappedRows) Columns() []string {
 	return r.parent.Columns()
 }
 
-func (r wrappedRows) Close() error {
+func (r *wrappedRows) Close() error {
+	if r.span != nil {
+		r.span.Finish()
+	}
 	return r.parent.Close()
 }
 
-func (r wrappedRows) Next(dest []driver.Value) (err error) {
-	span := r.GetSpan(r.ctx).NewChild("sql-rows-next")
-	span.SetLabel("component", "database/sql")
+func (r *wrappedRows) Next(dest []driver.Value) (err error) {
+	if r.span != nil {
+		return r.parent.Next(dest)
+	}
+	r.span = r.GetSpan(r.ctx).NewChild("sql-rows-iterate")
+	r.span.SetLabel("component", "database/sql")
 	defer func() {
-		span.SetLabel("err", fmt.Sprint(err))
-		span.Finish()
-		r.Log(r.ctx, "sql-rows-next", "err", err)
+		r.span.SetLabel("err", fmt.Sprint(err))
+		r.Log(r.ctx, "sql-rows-iterate", "err", err)
 	}()
-
 	return r.parent.Next(dest)
 }
 
